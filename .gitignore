@@ -1,0 +1,41 @@
+# Input/intermediate PDFs
+*.pdf
+
+# Generated page images
+*-page-*.png
+*-page-*.PNG
+-page-*.png
+-page-*.PNG
+page*_preprocessed.png
+
+# Extracted text
+*_text.html
+*.txt.txt
+_textextract/
+
+# Intermediate directories
+metislayout/
+metislayout-textextract/
+
+# Backup / temp files
+*~
+*.swp
+*.swo
+*.[~]
+
+# JSON metadata
+_summary.json
+
+# Output directory
+output/
+build/
+
+# Python
+__pycache__/
+*.pyc
+.eggs/
+*.egg-info/
+dist/
+build/
+venv/
+.venv/
