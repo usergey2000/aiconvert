@@ -706,9 +706,6 @@ def main():
     text_blocks = detect_text_blocks(img, min_area=args.min_text_area)
     if args.verbose:
         print(f"Detected {len(text_blocks)} text block(s).")
-    if text_blocks:
-        draw_overlay(img, text_blocks, 'text',
-                     os.path.join(out_dir, f'{base}_text_regions.png'))
 
     # ---- Resolve overlaps between text blocks and graphical objects ----
     tt_stats = {'overlaps_found': 0, 'overlaps_fixed': 0}
@@ -740,6 +737,11 @@ def main():
             'fixed': tg_stats['overlaps_fixed'],
         },
     }
+
+    # ---- Annotation: text regions (after overlap resolution) ----
+    if text_blocks:
+        draw_overlay(img, text_blocks, 'text',
+                     os.path.join(out_dir, f'{base}_text_regions.png'))
 
     # ---- Annotation ----
     if ordered:
