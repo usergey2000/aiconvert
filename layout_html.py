@@ -168,6 +168,11 @@ def ocr_with_ollama(block_img: np.ndarray, model: str) -> str:
 
     # Final sweep: remove any remaining "Note:" anywhere
     raw = re.sub(r'Note[:\s][^\n]*\n?', '\n', raw, flags=re.IGNORECASE)
+
+    # Remove empty lines (lines with no content between newlines)
+    import re
+    # Replace \n\n+ (empty line(s) between content) with \n (single newline)
+    raw = re.sub(r'\n\n+', '\n', raw)
     return raw.strip()
 
 
@@ -214,6 +219,10 @@ def ocr_text_block(block_img: np.ndarray, model: str = None) -> str:
         lang=TESSERACT_LANG,
         config=ocr_config,
     )
+    # Remove empty lines (lines with no content between newlines)
+    import re
+    # Replace \n\n+ (empty line(s) between content) with \n (single newline)
+    text = re.sub(r'\n\n+', '\n', text)
     return text.strip()
 
 
