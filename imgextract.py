@@ -554,9 +554,9 @@ def main():
     parser.add_argument('--verbose', action='store_true', help='Verbose debug output')
     parser.add_argument('--debug', action='store_true', help='Save intermediate debug masks')
     parser.add_argument('--ollama-model', '-m', default=None,
-                        help='Ollama vision model for OCR (e.g. qwen3-vl:8b). '
-                             'When given, Ollama is used per text block; '
-                             'otherwise Tesseract is used.')
+                        help='Ollama vision model for OCR (e.g. maternion/LightOnOCR-2:1b). '
+                             'Note: Standard qwen3-vl models (2b, 4b, 8b) are unstable for OCR and may crash. '
+                             'When given, Ollama is used per text block; otherwise Tesseract is used.')
     args = parser.parse_args()
 
     img = load_image(args.image)

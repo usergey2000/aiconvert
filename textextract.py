@@ -339,7 +339,7 @@ def main():
     parser.add_argument("--output", "-o", default=None, help="Output directory (default: same dir as images)")
     parser.add_argument("--verbose", "-v", action="store_true", help="Verbose output")
     parser.add_argument("--dry-run", action="store_true", help="Show what would be done without running")
-    parser.add_argument("--model", "-m", default="qwen3-vl:8b", help="Ollama vision model to use (default: qwen3-vl:8b)")
+    parser.add_argument("--model", "-m", default="maternion/LightOnOCR-2:1b", help="Ollama vision model to use (default: maternion/LightOnOCR-2:1b)")
     args = parser.parse_args()
 
     # Validate input files

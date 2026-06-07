@@ -109,6 +109,12 @@ Tested on sample pages (1651x1275):
 
 Extract text from page images using an Ollama vision model (OCR + grammar correction + HTML formatting) in a single call.
 
+### Vision Model Notes
+
+**qwen3-vl models (2b, 4b, 8b)**: These standard vision language models are unstable for OCR tasks and may crash with "model runner has unexpectedly stopped" errors. This appears to be a known limitation with the qwen3-vl family when processing OCR workloads.
+
+**Recommended model**: `maternion/LightOnOCR-2:1b` - A specialized OCR model that works reliably with this pipeline.
+
 ### Pipeline
 
 | Stage | What it does |
@@ -122,7 +128,7 @@ Extract text from page images using an Ollama vision model (OCR + grammar correc
 ### Usage
 
 ```bash
-# Basic usage (uses default model qwen3-vl:8b)
+# Basic usage (uses default model maternion/LightOnOCR-2:1b)
 python3 textextract.py page-1.png
 
 # Multiple images
@@ -145,7 +151,7 @@ python3 textextract.py page-1.png --dry-run
 
 | Parameter | Default | Description |
 |-- ----|------|------|
-| **model, -m** | qwen3-vl:8b | Ollama vision model to use for OCR |
+| **model, -m** | maternion/LightOnOCR-2:1b | Ollama vision model to use for OCR |
 | **output, -o** | same dir as images | Output directory for HTML files |
 | **verbose, -v** | off | Print detailed processing logs |
 | **dry-run** | off | Show what would be done without running |
@@ -161,7 +167,7 @@ python3 textextract.py page-1.png --dry-run
 
 - Python 3.8+
 - OpenCV, NumPy
-- Ollama (running locally, model pulled with `ollama pull qwen3-vl:8b`)
+- Ollama (running locally, model pulled with `ollama pull maternion/LightOnOCR-2:1b`)
 
 ## check_html.py - Layout Audit & Repair
 
