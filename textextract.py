@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 textextract.py - Extract text from image files (PNG, JPG, etc.) using OpenCV
-for preprocessing and a single qwen3-vl:8b call for OCR + grammar correction + HTML
+for preprocessing and a single vision model call for OCR + grammar correction + HTML
 formatting, saving output as HTML while preserving the original layout and formatting.
 
 Workflow per image:
@@ -159,11 +159,10 @@ def get_image_preview(img: np.ndarray, max_dim: int = 1200) -> np.ndarray:
 # Ollama interaction helpers (using the Python library)
 # =====================================================================
 
-OLLAMA_MODEL = "qwen3-vl:8b"               # vision model for OCR + HTML formatting
 OLLAMA_TEMPERATURE = 0                       # deterministic output
 
 
-def extract_and_format_html(img: np.ndarray) -> str:
+def extract_and_format_html(img: np.ndarray, model: str) -> str:
     """Use qwen3-vl to extract all text from the image and format as HTML in a single call.
 
     The image is preprocessed (deskewed, denoised, contrast-enhanced) and
@@ -196,7 +195,7 @@ def extract_and_format_html(img: np.ndarray) -> str:
     )
 
     response = ollama.chat(
-        model=OLLAMA_MODEL,
+        model=model,
         messages=[{
             "role": "user",
             "content": prompt,
@@ -278,7 +277,7 @@ def image_base(path: str) -> str:
 # Main processing
 # =====================================================================
 
-def process_image(image_path: str, out_dir: str, verbose: bool) -> dict:
+def process_image(image_path: str, out_dir: str, verbose: bool, model: str) -> dict:
     """Process a single image: load, preprocess, extract+format as HTML, save."""
     base = image_base(image_path)
     summary = {"image": os.path.basename(image_path), "steps": {}}
@@ -303,10 +302,10 @@ def process_image(image_path: str, out_dir: str, verbose: bool) -> dict:
         print(f"  Image: {w}x{h}  dtype={img.dtype}")
         print(f"  Preprocessed preview saved to {preview_path}")
 
-    # ---- Step 1: Single call — OCR + correction + HTML formatting via qwen3-vl:8b ----
+    # ---- Step 1: Single call — OCR + correction + HTML formatting via Ollama ----
     if verbose:
-        print(f"  [1/2] Extracting text and formatting HTML with {OLLAMA_MODEL}...")
-    raw_html = extract_and_format_html(img)
+        print(f"  [1/2] Extracting text and formatting HTML with {model}...")
+    raw_html = extract_and_format_html(img, model)
 
     # Post-process: strip code fences if the model wraps output in markdown
     corrected_html = clean_ollama_output(raw_html)
@@ -340,6 +339,7 @@ def main():
     parser.add_argument("--output", "-o", default=None, help="Output directory (default: same dir as images)")
     parser.add_argument("--verbose", "-v", action="store_true", help="Verbose output")
     parser.add_argument("--dry-run", action="store_true", help="Show what would be done without running")
+    parser.add_argument("--model", "-m", default="qwen3-vl:8b", help="Ollama vision model to use (default: qwen3-vl:8b)")
     args = parser.parse_args()
 
     # Validate input files
@@ -374,7 +374,7 @@ def main():
     for img in valid_images:
         print(f"\nProcessing: {img}")
         try:
-            result = process_image(img, out_dir, args.verbose)
+            result = process_image(img, out_dir, args.verbose, args.model)
             total_summary["images"].append(result)
         except Exception as e:
             print(f"Error processing {img}: {e}", file=sys.stderr)

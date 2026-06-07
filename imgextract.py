@@ -31,6 +31,7 @@ import json
 import re
 import numpy as np
 import cv2
+import layout_html
 
 
 # ===== Helpers =====
@@ -89,6 +90,225 @@ def iou(box1, box2) -> float:
     inter = max(0, xi2 - xi1) * max(0, yi2 - yi1)
     union = w1 * h1 + w2 * h2 - inter
     return inter / max(union, 1)
+
+
+def boxes_overlap(box1, box2) -> bool:
+    """Check if two (x, y, w, h) boxes have a positive-area overlap."""
+    x1, y1, w1, h1 = box1
+    x2, y2, w2, h2 = box2
+    xi1 = max(x1, x2)
+    yi1 = max(y1, y2)
+    xi2 = min(x1 + w1, x2 + w2)
+    yi2 = min(y1 + h1, y2 + h2)
+    return (xi2 > xi1) and (yi2 > yi1)
+
+
+def resolve_text_text_overlaps(blocks: list, overlap_threshold: float = 0.01) -> tuple:
+    """Detect and resolve overlaps between text blocks.
+
+    Blocks are processed in reading-order (input order is preserved).
+    For each overlapping pair the earlier block keeps its position;
+    the later block is shifted the minimum distance to escape the earlier
+    block's bbox.  Small pixel-level overlaps below *overlap_threshold*
+    (fraction of the smaller box's area) are ignored.
+
+    Returns
+    -------
+    (resolved_blocks, stats)
+        resolved_blocks : list of dicts with 'bbox' (list) and optional 'text'
+        stats : dict with 'overlaps_found' and 'overlaps_fixed' counts
+    """
+    stats = {'overlaps_found': 0, 'overlaps_fixed': 0}
+    if len(blocks) < 2:
+        return blocks, stats
+
+    # Work on mutable copies (list-of-list bboxes + optional text)
+    resolved = [{'bbox': list(b['bbox']), 'text': b.get('text', '')} for b in blocks]
+
+    for i in range(len(resolved)):
+        for j in range(i + 1, len(resolved)):
+            box_i = tuple(resolved[i]['bbox'])
+            box_j = tuple(resolved[j]['bbox'])
+            if not boxes_overlap(box_i, box_j):
+                continue
+            stats['overlaps_found'] += 1
+
+            # Intersection dimensions
+            x1, y1, w1, h1 = box_i
+            x2, y2, w2, h2 = box_j
+            xi1 = max(x1, x2)
+            yi1 = max(y1, y2)
+            xi2 = min(x1 + w1, x2 + w2)
+            yi2 = min(y1 + h1, y2 + h2)
+            ix = max(0, xi2 - xi1)
+            iy = max(0, yi2 - yi1)
+            overlap_area = ix * iy
+            smaller_area = min(w1 * h1, w2 * h2)
+            overlap_frac = overlap_area / max(smaller_area, 1)
+
+            if overlap_frac < overlap_threshold:
+                continue
+
+            stats['overlaps_fixed'] += 1
+
+            # Compute the minimum shift needed to completely escape box_i.
+            # For each direction the new j position is computed explicitly
+            # and the shift distance is the absolute difference from the
+            # current position.
+            candidates = [
+                # (direction_label, new_x, new_y, distance)
+                ('left',   x1 - w2, y2, abs(x2 - (x1 - w2))),
+                ('right',  x1 + w1, y2, abs((x1 + w1) - x2)),
+                ('top',    x2, y1 - h2, abs(y2 - (y1 - h2))),
+                ('bottom', x2, y1 + h1, abs((y1 + h1) - y2)),
+            ]
+            best_dir, nx, ny, best_dist = min(candidates, key=lambda c: c[3])
+
+            resolved[j]['bbox'] = [nx, ny, w2, h2]
+
+    return resolved, stats
+
+
+def resolve_text_graph_overlaps(
+    text_blocks: list,
+    graph_regions: list,
+    overlap_threshold: float = 0.01,
+    page_w: int = 4000,
+    page_h: int = 4000,
+) -> tuple:
+    """Shrink text blocks so they no longer overlap graphical object bboxes.
+
+    Graphical objects are never moved; text blocks are shrunk on the shorter
+    overlap dimension to minimise text disruption.  If shrinking would produce
+    a sub-threshold dimension the block is moved along the longer edge instead.
+    If it cannot fit on the page in any direction the block is hidden
+    (zero-width) — its text is visible inside the graph.
+
+    Returns
+    -------
+    (text_blocks, stats)   (text_blocks mutated in-place)
+    """
+    stats = {'overlaps_found': 0, 'overlaps_fixed': 0}
+    if not graph_regions or not text_blocks:
+        return text_blocks, stats
+
+    MIN_DIM = 50
+
+    for tb in text_blocks:
+        tb_bbox = tuple(tb['bbox'])
+        x1, y1, w1, h1 = tb_bbox
+
+        for gr in graph_regions:
+            gr_bbox = tuple(gr['bbox'])
+            x2, y2, w2, h2 = gr_bbox
+
+            xi1 = max(x1, x2)
+            yi1 = max(y1, y2)
+            xi2 = min(x1 + w1, x2 + w2)
+            yi2 = min(y1 + h1, y2 + h2)
+            ix = max(0, xi2 - xi1)
+            iy = max(0, yi2 - yi1)
+
+            if ix == 0 or iy == 0:
+                continue  # no overlap
+
+            stats['overlaps_found'] += 1
+
+            overlap_area = ix * iy
+            smaller_area = min(w1 * h1, w2 * h2)
+            if overlap_area / max(smaller_area, 1) < overlap_threshold:
+                continue
+
+            stats['overlaps_fixed'] += 1
+
+            if ix <= iy:
+                # Shrink width — clip the edge closer to graph centre
+                if xi1 <= x1 + w1 / 2:
+                    # Graph is on the left side
+                    new_x = xi1
+                    new_w = w1 - ix
+                else:
+                    # Graph is on the right side
+                    new_x = x1
+                    new_w = w1 - ix
+                new_bbox = (new_x, y1, new_w, h1)
+                if new_w < MIN_DIM:
+                    # Can't shrink further — move along the longer (height) axis
+                    new_bbox = _try_move_vertically(
+                        x1, y1, w1, h1, x2, y2, w2, h2, page_h)
+            else:
+                # Shrink height
+                if yi1 <= y1 + h1 / 2:
+                    # Graph is above
+                    new_y = yi1
+                    new_h = h1 - iy
+                else:
+                    # Graph is below
+                    new_y = y1
+                    new_h = h1 - iy
+                new_bbox = (x1, new_y, w1, new_h)
+                if new_h < MIN_DIM:
+                    # Can't shrink further — move along the longer (width) axis
+                    new_bbox = _try_move_horizontally(
+                        x1, y1, w1, h1, x2, y2, w2, h2, page_w)
+
+            # Clamp to non-negative dimensions and page boundary
+            new_bbox = (
+                max(0, new_bbox[0]),
+                max(0, new_bbox[1]),
+                max(0, min(new_bbox[2], page_w - new_bbox[0])),
+                max(0, min(new_bbox[3], page_h - new_bbox[1])),
+            )
+
+            # If clamping changed the position, check for residual overlap
+            nx, ny, nw, nh = new_bbox
+            if nx != x1 or ny != y1 or nw != w1 or nh != h1:
+                # Check if the clamped bbox still overlaps the graph
+                xi1 = max(nx, x2)
+                yi1 = max(ny, y2)
+                xi2 = min(nx + nw, x2 + w2)
+                yi2 = min(ny + nh, y2 + h2)
+                if (xi2 > xi1) and (yi2 > yi1):
+                    # Still overlaps — hide (its text is visible in the graph)
+                    nw = 0
+                new_bbox = (nx, ny, max(0, nw), max(0, nh))
+
+            tb['bbox'] = list(new_bbox)
+            x1, y1, w1, h1 = new_bbox
+
+    return text_blocks, stats
+
+
+def _try_move_vertically(
+    x1, y1, w1, h1, x2, y2, w2, h2, page_h: int,
+) -> tuple:
+    """Try to move a text block vertically (above or below a graph)."""
+    # Move below graph
+    new_y = y2 + h2 + 4
+    if new_y + h1 <= page_h:
+        return (x1, new_y, w1, h1)
+    # Move above graph
+    new_y = max(0, y2 - h1 - 4)
+    if new_y >= 0:
+        return (x1, new_y, w1, h1)
+    # Neither side fits — hide (zero width)
+    return (x1, y1, 0, h1)
+
+
+def _try_move_horizontally(
+    x1, y1, w1, h1, x2, y2, w2, h2, page_w: int,
+) -> tuple:
+    """Try to move a text block horizontally (left or right of a graph)."""
+    # Move right of graph
+    new_x = x2 + w2 + 4
+    if new_x + w1 <= page_w:
+        return (new_x, y1, w1, h1)
+    # Move left of graph
+    new_x = max(0, x2 - w1 - 4)
+    if new_x >= 0:
+        return (new_x, y1, w1, h1)
+    # Neither side fits — hide (zero width)
+    return (x1, y1, 0, h1)
 
 
 # ===== Detection strategies =====
@@ -333,6 +553,10 @@ def main():
                         help='Saturation threshold for color detection (default: 30)')
     parser.add_argument('--verbose', action='store_true', help='Verbose debug output')
     parser.add_argument('--debug', action='store_true', help='Save intermediate debug masks')
+    parser.add_argument('--ollama-model', '-m', default=None,
+                        help='Ollama vision model for OCR (e.g. qwen3-vl:8b). '
+                             'When given, Ollama is used per text block; '
+                             'otherwise Tesseract is used.')
     args = parser.parse_args()
 
     img = load_image(args.image)
@@ -486,6 +710,37 @@ def main():
         draw_overlay(img, text_blocks, 'text',
                      os.path.join(out_dir, f'{base}_text_regions.png'))
 
+    # ---- Resolve overlaps between text blocks and graphical objects ----
+    tt_stats = {'overlaps_found': 0, 'overlaps_fixed': 0}
+    tg_stats = {'overlaps_found': 0, 'overlaps_fixed': 0}
+
+    if text_blocks and ordered:
+        # Text-text overlaps
+        text_resolved, tt_stats = resolve_text_text_overlaps(text_blocks)
+        for i, tb in enumerate(text_resolved):
+            text_blocks[i]['bbox'] = tuple(tb['bbox'])
+
+        # Text-graph overlaps (graphical objects take precedence)
+        text_blocks, tg_stats = resolve_text_graph_overlaps(text_blocks, ordered, page_w=w, page_h=h)
+
+    total_found = tt_stats['overlaps_found'] + tg_stats['overlaps_found']
+    total_fixed = tt_stats['overlaps_fixed'] + tg_stats['overlaps_fixed']
+    if args.verbose:
+        print(f"Overlaps: {total_found} found, {total_fixed} fixed "
+              f"(text-text: {tt_stats['overlaps_fixed']}, "
+              f"text-graph: {tg_stats['overlaps_fixed']})")
+
+    overlaps_summary = {
+        'text_text': {
+            'found': tt_stats['overlaps_found'],
+            'fixed': tt_stats['overlaps_fixed'],
+        },
+        'text_graph': {
+            'found': tg_stats['overlaps_found'],
+            'fixed': tg_stats['overlaps_fixed'],
+        },
+    }
+
     # ---- Annotation ----
     if ordered:
         draw_overlay(img, ordered, 'graph',
@@ -522,10 +777,22 @@ def main():
         'text_blocks': [{'bbox': {'x': b['bbox'][0], 'y': b['bbox'][1],
                                   'width': b['bbox'][2], 'height': b['bbox'][3]}}
                         for b in text_blocks],
+        'overlap_resolution': overlaps_summary,
     }
     summary_path = os.path.join(out_dir, f'{base}_summary.json')
     with open(summary_path, 'w') as f:
         json.dump(summary, f, indent=2)
+
+    # ---- Assemble layout-preserving HTML (text + images at original positions) ----
+    ocr_backend = f"Ollama ({args.ollama_model})" if args.ollama_model else "Tesseract"
+    if args.verbose:
+        print(f"OCR backend: {ocr_backend}")
+    html_output = layout_html.assemble_layout_html(img, h, w, ordered, text_blocks, model=args.ollama_model)
+    html_path = os.path.join(out_dir, f'{base}_layout.html')
+    with open(html_path, 'w', encoding='utf-8') as f:
+        f.write(html_output)
+    if args.verbose:
+        print(f"Saved layout HTML to {html_path}")
 
 
 if __name__ == '__main__':
