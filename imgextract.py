@@ -460,6 +460,8 @@ def main():
                         help='Ollama vision model for OCR (e.g. maternion/LightOnOCR-2:1b). '
                              'Note: Standard qwen3-vl models (2b, 4b, 8b) are unstable for OCR and may crash. '
                              'When given, Ollama is used per text block; otherwise Tesseract is used.')
+    parser.add_argument('--tess-lang', default='eng',
+                        help='Tesseract language(s) to use (default: eng). See tesseract --list-langs.')
     args = parser.parse_args()
 
     img = load_image(args.image)
@@ -797,7 +799,10 @@ def main():
     ocr_backend = f"Ollama ({args.ollama_model})" if args.ollama_model else "Tesseract"
     if args.verbose >= 1:
         print(f"OCR backend: {ocr_backend}")
-    html_output = layout_html.assemble_layout_html(img, h, w, ordered, text_blocks, model=args.ollama_model)
+    html_output = layout_html.assemble_layout_html(
+        img, h, w, ordered, text_blocks,
+        model=args.ollama_model, tess_lang=args.tess_lang,
+    )
     html_path = os.path.join(out_dir, f'{base}_layout.html')
     with open(html_path, 'w', encoding='utf-8') as f:
         f.write(html_output)

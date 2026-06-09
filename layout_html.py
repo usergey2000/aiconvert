@@ -176,7 +176,7 @@ def ocr_with_ollama(block_img: np.ndarray, model: str) -> str:
     return raw.strip()
 
 
-def ocr_text_block(block_img: np.ndarray, model: str = None) -> str:
+def ocr_text_block(block_img: np.ndarray, model: str = None, tess_lang: str = "eng") -> str:
     """OCR a single text-block image and return extracted text.
 
     Uses the Ollama vision model when *model* is provided;
@@ -189,6 +189,8 @@ def ocr_text_block(block_img: np.ndarray, model: str = None) -> str:
     model : str, optional
         Ollama model name (e.g. ``qwen3-vl:8b``).
         When *None*, Tesseract is used.
+    tess_lang : str
+        Tesseract language code(s) (e.g. ``'eng'``, ``'deu+fra'``).
 
     Returns
     -------
@@ -198,7 +200,7 @@ def ocr_text_block(block_img: np.ndarray, model: str = None) -> str:
     if model is not None:
         return ocr_with_ollama(block_img, model)
 
-    # --- Tesseract path (unchanged) ---
+    # --- Tesseract path ---
     rgb = cv2.cvtColor(block_img, cv2.COLOR_BGR2RGB)
 
     # Convert to PIL Image for pytesseract
@@ -216,7 +218,7 @@ def ocr_text_block(block_img: np.ndarray, model: str = None) -> str:
     )
     text = pytesseract.image_to_string(
         img_thresh,
-        lang=TESSERACT_LANG,
+        lang=tess_lang,
         config=ocr_config,
     )
     # Remove empty lines (lines with no content between newlines)
@@ -251,6 +253,7 @@ def assemble_layout_html(
     graphical_regions: list,
     text_blocks: list,
     model: str = None,
+    tess_lang: str = "eng",
 ) -> str:
     """Build a layout-preserving HTML document from detected regions.
 
@@ -269,6 +272,8 @@ def assemble_layout_html(
         Text block regions from imgextract.py (each has 'bbox').
     model : str, optional
         Ollama model name for OCR. When None, Tesseract is used.
+    tess_lang : str
+        Tesseract language code(s) (e.g. ``'eng'``, ``'deu+fra'``).
 
     Returns
     -------
@@ -311,7 +316,7 @@ def assemble_layout_html(
         crop = img[y:y + bh, x:x + bw]
         if crop.size == 0:
             continue
-        text = ocr_text_block(crop, model=model)
+        text = ocr_text_block(crop, model=model, tess_lang=tess_lang)
         text_items.append({
             "x": x, "y": y, "w": bw, "h": bh,
             "text": sanitize_html(text),
