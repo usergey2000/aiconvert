@@ -174,106 +174,9 @@ def resolve_text_graph_overlaps(
     page_w: int = 4000,
     page_h: int = 4000,
 ) -> tuple:
-    """Shrink text blocks so they no longer overlap graphical object bboxes.
-
-    Graphical objects are never moved; text blocks are shrunk on the shorter
-    overlap dimension to minimise text disruption.  If shrinking would produce
-    a sub-threshold dimension the block is moved along the longer edge instead.
-    If it cannot fit on the page in any direction the block is hidden
-    (zero-width) — its text is visible inside the graph.
-
-    Returns
-    -------
-    (text_blocks, stats)   (text_blocks mutated in-place)
-    """
+    """Leave text blocks untouched — they are processed normally even when
+    their bboxes intersect graphical objects."""
     stats = {'overlaps_found': 0, 'overlaps_fixed': 0}
-    if not graph_regions or not text_blocks:
-        return text_blocks, stats
-
-    MIN_DIM = 50
-
-    for tb in text_blocks:
-        tb_bbox = tuple(tb['bbox'])
-        x1, y1, w1, h1 = tb_bbox
-
-        for gr in graph_regions:
-            gr_bbox = tuple(gr['bbox'])
-            x2, y2, w2, h2 = gr_bbox
-
-            xi1 = max(x1, x2)
-            yi1 = max(y1, y2)
-            xi2 = min(x1 + w1, x2 + w2)
-            yi2 = min(y1 + h1, y2 + h2)
-            ix = max(0, xi2 - xi1)
-            iy = max(0, yi2 - yi1)
-
-            if ix == 0 or iy == 0:
-                continue  # no overlap
-
-            stats['overlaps_found'] += 1
-
-            overlap_area = ix * iy
-            smaller_area = min(w1 * h1, w2 * h2)
-            if overlap_area / max(smaller_area, 1) < overlap_threshold:
-                continue
-
-            stats['overlaps_fixed'] += 1
-
-            if ix <= iy:
-                # Shrink width — clip the edge closer to graph centre
-                if xi1 <= x1 + w1 / 2:
-                    # Graph is on the left side
-                    new_x = xi1
-                    new_w = w1 - ix
-                else:
-                    # Graph is on the right side
-                    new_x = x1
-                    new_w = w1 - ix
-                new_bbox = (new_x, y1, new_w, h1)
-                if new_w < MIN_DIM:
-                    # Can't shrink further — move along the longer (height) axis
-                    new_bbox = _try_move_vertically(
-                        x1, y1, w1, h1, x2, y2, w2, h2, page_h)
-            else:
-                # Shrink height
-                if yi1 <= y1 + h1 / 2:
-                    # Graph is above
-                    new_y = yi1
-                    new_h = h1 - iy
-                else:
-                    # Graph is below
-                    new_y = y1
-                    new_h = h1 - iy
-                new_bbox = (x1, new_y, w1, new_h)
-                if new_h < MIN_DIM:
-                    # Can't shrink further — move along the longer (width) axis
-                    new_bbox = _try_move_horizontally(
-                        x1, y1, w1, h1, x2, y2, w2, h2, page_w)
-
-            # Clamp to non-negative dimensions and page boundary
-            new_bbox = (
-                max(0, new_bbox[0]),
-                max(0, new_bbox[1]),
-                max(0, min(new_bbox[2], page_w - new_bbox[0])),
-                max(0, min(new_bbox[3], page_h - new_bbox[1])),
-            )
-
-            # If clamping changed the position, check for residual overlap
-            nx, ny, nw, nh = new_bbox
-            if nx != x1 or ny != y1 or nw != w1 or nh != h1:
-                # Check if the clamped bbox still overlaps the graph
-                xi1 = max(nx, x2)
-                yi1 = max(ny, y2)
-                xi2 = min(nx + nw, x2 + w2)
-                yi2 = min(ny + nh, y2 + h2)
-                if (xi2 > xi1) and (yi2 > yi1):
-                    # Still overlaps — hide (its text is visible in the graph)
-                    nw = 0
-                new_bbox = (nx, ny, max(0, nw), max(0, nh))
-
-            tb['bbox'] = list(new_bbox)
-            x1, y1, w1, h1 = new_bbox
-
     return text_blocks, stats
 
 
@@ -730,7 +633,7 @@ def main():
 
     total_found = tt_stats['overlaps_found'] + tg_stats['overlaps_found']
     total_fixed = tt_stats['overlaps_fixed'] + tg_stats['overlaps_fixed']
-    if args.verbose >= 1:
+    if args.verbose >= 1 and text_blocks:
         print(f"Overlaps: {total_found} found, {total_fixed} fixed "
               f"(text-text: {tt_stats['overlaps_fixed']}, "
               f"text-graph: {tg_stats['overlaps_fixed']})")
