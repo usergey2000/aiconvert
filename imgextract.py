@@ -468,13 +468,32 @@ def merge_regions(regions, gap_thresh: float = 0.12, max_frac: float = 0.35):
 # ===== Detect text blocks =====
 
 def detect_text_blocks(img, min_area: int = 2000) -> list:
-    """Detect text blocks as connected components of dark pixels."""
+    """Detect text blocks as connected components of dark pixels.
+
+    Uses threshold-based detection with horizontal-only morphological operations
+    to connect adjacent dark pixels within each text line without merging separate
+    lines together. The key insight: text lines are separated by vertical gaps
+    (typically 5-15 pixels), while characters within a line have much smaller gaps.
+    By using a horizontally-oriented kernel, we connect characters within each line
+    but leave the vertical gaps between lines intact.
+
+    A secondary pass detects text in colored regions (green/yellow/orange cells)
+    by lowering the threshold for areas with significant color saturation.
+    """
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     h, w = img.shape[:2]
-    _, thresh = cv2.threshold(gray, 180, 255, cv2.THRESH_BINARY_INV)
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
-    eroded = cv2.erode(cv2.dilate(thresh, kernel, iterations=2), kernel, iterations=1)
-    contours, _ = cv2.findContours(eroded, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    # Standard threshold for dark text on light backgrounds (threshold=180)
+    _, thresh_light = cv2.threshold(gray, 180, 255, cv2.THRESH_BINARY_INV)
+
+    # Connect adjacent dark pixels horizontally within each text line using a
+    # horizontal ellipsoidal kernel. This bridges gaps between characters on the
+    # same line without expanding vertically enough to merge adjacent lines.
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 3))
+    connected = cv2.morphologyEx(thresh_light, cv2.MORPH_CLOSE, kernel, iterations=1)
+
+    # Find contours in the horizontally-connected mask
+    contours, _ = cv2.findContours(connected, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     blocks = []
     for cnt in contours:
         area = cv2.contourArea(cnt)
