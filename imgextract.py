@@ -551,7 +551,8 @@ def main():
                         help='Proximity gap for merging nearby regions (default: 0.12)')
     parser.add_argument('--saturation-threshold', type=int, default=30,
                         help='Saturation threshold for color detection (default: 30)')
-    parser.add_argument('--verbose', action='store_true', help='Verbose debug output')
+    parser.add_argument('-v', '--verbose', action='count', default=0,
+                        help='Verbosity level: 0=silent (default), -v=summary, -vv=details')
     parser.add_argument('--debug', action='store_true', help='Save intermediate debug masks')
     parser.add_argument('--ollama-model', '-m', default=None,
                         help='Ollama vision model for OCR (e.g. maternion/LightOnOCR-2:1b). '
@@ -569,7 +570,7 @@ def main():
     page_frac_threshold = 0.50  # reject any bbox covering >50% of the page
     max_object_frac = 0.25  # max area fraction for a single graphical object
 
-    if args.verbose:
+    if args.verbose >= 1:
         print(f"Input: {args.image} ({w}x{h}, total area={w*h:,})")
         print(f"Output dir: {out_dir}")
         print(f"Min graphical area: {args.min_area_pct} => {min_abs_area:.0f} px")
@@ -583,11 +584,11 @@ def main():
                      ('cc', lambda: detect_cc_regions(img)),
                      ('gradient', lambda: detect_gradient_regions(img))]:
         result = fn()
-        if args.verbose:
+        if args.verbose >= 1:
             print(f"  {name:8s} regions: {len(result)}")
         regions.extend(result)
 
-    if args.verbose:
+    if args.verbose >= 1:
         print(f"  Total raw regions: {len(regions)}")
 
     # Pre-filter: remove page-spanning regions BEFORE merging
@@ -596,22 +597,22 @@ def main():
     for r in regions:
         area = box_area(r['bbox'])
         if area > total_area * page_frac_threshold:
-            if args.verbose:
+            if args.verbose >= 1:
                 print(f"  PRE-FILTER (page-spanning): [{r['bbox'][2]}x{r['bbox'][3]}] {area/total_area:.0%}")
             continue
         if area < min_abs_area:
-            if args.verbose:
+            if args.verbose >= 1:
                 print(f"  PRE-FILTER (area): [{r['bbox'][2]}x{r['bbox'][3]}] {area} < {min_abs_area:.0f}")
             continue
         pre_merged.append(r)
 
-    if args.verbose:
+    if args.verbose >= 1:
         print(f"  After pre-filter: {len(pre_merged)} / {len(regions)} regions")
 
     # Merge nearby regions
     merged = merge_regions(pre_merged, gap_thresh=args.gap_threshold)
 
-    if args.verbose:
+    if args.verbose >= 1:
         print(f"  After merging: {len(merged)} regions")
         for i, r in enumerate(merged):
             print(f"    {i}: [{r['bbox'][2]}x{r['bbox'][3]}] area={box_area(r['bbox']):,}  sources={r['sources']}")
@@ -631,7 +632,7 @@ def main():
         if not dominated:
             post_merge.append(ri)
 
-    if args.verbose:
+    if args.verbose >= 1:
         print(f"  After dedup: {len(post_merge)} regions")
 
     # Filter to final graphical objects
@@ -660,7 +661,7 @@ def main():
 
     # Relaxed fallback if nothing found
     if not graphical:
-        if args.verbose:
+        if args.verbose >= 1:
             print("  Trying relaxed filter (min-area-pct * 0.3)...")
         relaxed = min_abs_area * 0.3
         graphical = [r for r in merged
@@ -685,7 +686,7 @@ def main():
             if not dominated:
                 final.append(r)
         graphical = final
-        if args.verbose:
+        if args.verbose >= 1:
             print(f"  Relaxed filter: {len(graphical)} graphical objects")
 
     # Sort in reading order
@@ -704,16 +705,25 @@ def main():
 
     # ---- Detect text blocks ----
     text_blocks = detect_text_blocks(img, min_area=args.min_text_area)
-    if args.verbose:
+    if args.verbose >= 1:
         print(f"Detected {len(text_blocks)} text block(s).")
 
     # ---- Resolve overlaps between text blocks and graphical objects ----
     tt_stats = {'overlaps_found': 0, 'overlaps_fixed': 0}
     tg_stats = {'overlaps_found': 0, 'overlaps_fixed': 0}
 
+    if args.verbose >= 2:
+        text_pre = [tuple(b['bbox']) for b in text_blocks]
+    else:
+        text_pre = []
+
     if text_blocks and ordered:
         # Text-text overlaps
         text_resolved, tt_stats = resolve_text_text_overlaps(text_blocks)
+
+        # Capture intermediate state after text-text resolution for verbose >= 2 attribution
+        if args.verbose >= 2:
+            text_mid = [tuple(b['bbox']) for b in text_blocks]
         for i, tb in enumerate(text_resolved):
             text_blocks[i]['bbox'] = tuple(tb['bbox'])
 
@@ -722,10 +732,106 @@ def main():
 
     total_found = tt_stats['overlaps_found'] + tg_stats['overlaps_found']
     total_fixed = tt_stats['overlaps_fixed'] + tg_stats['overlaps_fixed']
-    if args.verbose:
+    if args.verbose >= 1:
         print(f"Overlaps: {total_found} found, {total_fixed} fixed "
               f"(text-text: {tt_stats['overlaps_fixed']}, "
               f"text-graph: {tg_stats['overlaps_fixed']})")
+
+    # Per-block overlap resolution details at verbose level >= 2
+    if args.verbose >= 2 and text_pre:
+        print(f"\nText block overlap resolution (per-block detail):")
+        for i, (tb_pre, tb_post) in enumerate(zip(text_pre, text_blocks)):
+            px, py, pw, ph = text_pre[i]
+            nx, ny, nw, nh = tuple(tb_post['bbox'])
+
+            # Determine remaining overlaps after resolution
+            rem_graphs = []
+            for gi, g in enumerate(ordered):
+                gx, gy, gw, gh = g['bbox']
+                xi = max(nx, gx); yi = max(ny, gy)
+                xe = min(nx + nw, gx + gw); ye = min(ny + nh, gy + gh)
+                if (xe > xi) and (ye > yi):
+                    rem_graphs.append(f'graph[{gi+1}]({(xe-xi)*(ye-yi)}px)')
+
+            # Compute what changed by comparing pre/mid/post phases separately
+            w_changed = (pw != nw)
+            h_changed = (ph != nh)
+            x_mid, y_mid, w_mid, h_mid = text_mid[i] if 'text_mid' in locals() else (px, py, pw, ph)
+
+            # Determine which phase caused what change
+            causes = []
+            if text_mid:
+                # Phase 1: text-text changes
+                mid_x_changed = (x_mid != px)
+                mid_y_changed = (y_mid != py)
+                mid_w_changed = (w_mid != pw)
+                mid_h_changed = (h_mid != ph)
+                if mid_w_changed or mid_h_changed:
+                    causes.append(f'text-text dim-change')
+                    # Find original text overlap partners
+                    for j in range(len(text_pre)):
+                        if i == j: continue
+                        xj, yj, wj, hj = text_pre[j]
+                        xi2 = max(px, xj); yi2 = max(py, yj)
+                        xe2 = min(px + pw, xj + wj); ye2 = min(py + ph, yj + hj)
+                        if (xe2 > xi2) and (ye2 > yi2):
+                            causes.append(f'text#{j+1}')
+
+                # Phase 2: graph changes = post minus mid state
+                gx2, gy2, gw2, gh2 = text_mid[i]
+
+                # Check if ANY mid→post component changed (w/h AND/OR x/y)
+                dim_changed = (gw2 != nw or gh2 != nh)
+                pos_changed = (gx2 != nx or gy2 != ny)
+                if dim_changed or pos_changed:
+                    for gi, g in enumerate(ordered):
+                        grx, gry, grw, grh = g['bbox']
+                        # Compare mid-bbox with graph to determine shrink direction
+                        xix = max(gx2, grx); yiy = max(gy2, gry)
+                        xex = min(gx2 + gw2, grx + grw); yey = min(gy2 + gh2, gry + grh)
+                        ix_val = max(0, xex - xix); iy_val = max(0, yey - yiy)
+                        if ix_val == 0 or iy_val == 0: continue
+                        # Mimic resolve_text_graph_overlaps logic: shorter dim gets shrunk
+                        if ix_val <= iy_val:
+                            side = 'LEFT' if (xix <= grx + grw / 2) else 'RIGHT'
+                            causes.append(f'graph[{gi+1}] {side}({ix_val}x{iy_val})')
+                        else:
+                            side = 'TOP' if (yiy <= gry + grh / 2) else 'BOTTOM'
+                            causes.append(f'graph[{gi+1}] {side}({ix_val}x{iy_val})')
+
+                    # If position changed but dimensions didn't, it was a fallback move
+                    # (_try_move_vertically or _try_move_horizontally after sub-threshold shrink)
+                    if pos_changed and not dim_changed:
+                        for gi, g in enumerate(ordered):
+                            grx, gry, grw, grh = g['bbox']
+                            xix = max(gx2, grx); yiy = max(gy2, gry)
+                            xex = min(gx2 + gw2, grx + grw); yey = min(gy2 + gh2, gry + grh)
+                            ix_val = max(0, xex - xix); iy_val = max(0, yey - yiy)
+                            if ix_val == 0 or iy_val == 0: continue
+                            if iy_val > ix_val:
+                                ny_below = gry + grh + 4
+                                ny_above = max(0, gry - gh2 - 4)
+                                moved_down = (gy2 + gh2 <= gri + grh) or \
+                                    (ny >= ny_below) or (ny == 0 and abs(ny - gy2) > abs(ny_above - gy2))
+                                causes.append(f'graph[{gi+1}] move {"down" if moved_down else "up"} '
+                                              f'(shrunk-w → {gw2}<{MIN_DIM})')
+                            else:
+                                nx_right = grx + grw + 4
+                                nx_left = max(0, grx - gw2 - 4)
+                                moved_right = (gx2 + gw2 <= grx) or \
+                                    (nx >= nx_right) or (nx == 0 and abs(nx - gx2) > abs(nx_left - gx2))
+                                causes.append(f'graph[{gi+1}] move {"right" if moved_right else "left"} '
+                                              f'(shrunk-h → {gh2}<{MIN_DIM})')
+
+            if not causes:
+                action = 'unchanged'
+            elif nw == 0 or nh == 0:
+                graph_names = [f'graph[{gi+1}]' for gi, _ in enumerate(ordered)]
+                action = f'HIDDEN by graph ({", ".join(graph_names)})'
+            else:
+                action = f'({"; ".join(causes)})'
+
+            print(f"  [{i+1}] [{px},{py},{pw}x{ph}] -> [{nx},{ny},{nw}x{nh}] ({action})")
 
     overlaps_summary = {
         'text_text': {
@@ -787,13 +893,13 @@ def main():
 
     # ---- Assemble layout-preserving HTML (text + images at original positions) ----
     ocr_backend = f"Ollama ({args.ollama_model})" if args.ollama_model else "Tesseract"
-    if args.verbose:
+    if args.verbose >= 1:
         print(f"OCR backend: {ocr_backend}")
     html_output = layout_html.assemble_layout_html(img, h, w, ordered, text_blocks, model=args.ollama_model)
     html_path = os.path.join(out_dir, f'{base}_layout.html')
     with open(html_path, 'w', encoding='utf-8') as f:
         f.write(html_output)
-    if args.verbose:
+    if args.verbose >= 1:
         print(f"Saved layout HTML to {html_path}")
 
 
