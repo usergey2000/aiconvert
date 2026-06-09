@@ -107,10 +107,9 @@ def resolve_text_text_overlaps(blocks: list, overlap_threshold: float = 0.01) ->
     """Detect and resolve overlaps between text blocks.
 
     Blocks are processed in reading-order (input order is preserved).
-    For each overlapping pair the earlier block keeps its position;
-    the later block is shifted the minimum distance to escape the earlier
-    block's bbox.  Small pixel-level overlaps below *overlap_threshold*
-    (fraction of the smaller box's area) are ignored.
+    For each overlapping pair the block with the smaller area is dropped;
+    the larger block keeps its position.  Small pixel-level overlaps below
+    *overlap_threshold* (fraction of the smaller box's area) are ignored.
 
     Returns
     -------
@@ -124,9 +123,15 @@ def resolve_text_text_overlaps(blocks: list, overlap_threshold: float = 0.01) ->
 
     # Work on mutable copies (list-of-list bboxes + optional text)
     resolved = [{'bbox': list(b['bbox']), 'text': b.get('text', '')} for b in blocks]
+    n = len(resolved)
+    to_remove: set[int] = set()
 
-    for i in range(len(resolved)):
-        for j in range(i + 1, len(resolved)):
+    for i in range(n):
+        if i in to_remove:
+            continue
+        for j in range(i + 1, n):
+            if j in to_remove:
+                continue
             box_i = tuple(resolved[i]['bbox'])
             box_j = tuple(resolved[j]['bbox'])
             if not boxes_overlap(box_i, box_j):
@@ -143,7 +148,9 @@ def resolve_text_text_overlaps(blocks: list, overlap_threshold: float = 0.01) ->
             ix = max(0, xi2 - xi1)
             iy = max(0, yi2 - yi1)
             overlap_area = ix * iy
-            smaller_area = min(w1 * h1, w2 * h2)
+            area_i = w1 * h1
+            area_j = w2 * h2
+            smaller_area = min(area_i, area_j)
             overlap_frac = overlap_area / max(smaller_area, 1)
 
             if overlap_frac < overlap_threshold:
@@ -151,22 +158,13 @@ def resolve_text_text_overlaps(blocks: list, overlap_threshold: float = 0.01) ->
 
             stats['overlaps_fixed'] += 1
 
-            # Compute the minimum shift needed to completely escape box_i.
-            # For each direction the new j position is computed explicitly
-            # and the shift distance is the absolute difference from the
-            # current position.
-            candidates = [
-                # (direction_label, new_x, new_y, distance)
-                ('left',   x1 - w2, y2, abs(x2 - (x1 - w2))),
-                ('right',  x1 + w1, y2, abs((x1 + w1) - x2)),
-                ('top',    x2, y1 - h2, abs(y2 - (y1 - h2))),
-                ('bottom', x2, y1 + h1, abs((y1 + h1) - y2)),
-            ]
-            best_dir, nx, ny, best_dist = min(candidates, key=lambda c: c[3])
+            # Drop the smaller block; keep the larger one
+            if area_j <= area_i:
+                to_remove.add(j)
+            else:
+                to_remove.add(i)
 
-            resolved[j]['bbox'] = [nx, ny, w2, h2]
-
-    return resolved, stats
+    return [b for idx, b in enumerate(resolved) if idx not in to_remove], stats
 
 
 def resolve_text_graph_overlaps(
