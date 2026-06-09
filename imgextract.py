@@ -727,6 +727,64 @@ def main():
     if args.verbose:
         print(f"Detected {len(text_blocks)} text block(s).")
 
+    # ---- Combine adjoining text blocks into paragraphs before OCR ----
+    paragraph_blocks = []
+    para_count = 0
+    line_count = len(text_blocks)
+    used = [False] * len(text_blocks)
+
+    for i in range(len(text_blocks)):
+        if used[i]:
+            continue
+        # Start a new paragraph group with block i
+        group = [i]
+        used[i] = True
+        merged_x2 = text_blocks[i]['bbox'][0] + text_blocks[i]['bbox'][2]
+
+        for j in range(i + 1, len(text_blocks)):
+            if used[j]:
+                continue
+            bx, by, bw, bh = text_blocks[j]['bbox']
+            last_g = group[-1]
+            lx, ly, lbw, lbh = text_blocks[last_g]['bbox']
+
+            vertical_gap = by - (ly + lbh)
+            avg_height = sum(text_blocks[g]['bbox'][3] for g in group) / len(group)
+            # Adjoin if: within 2× average line-height gap and left edges are similar
+            if vertical_gap < 0:
+                continue  # blocks out of reading order (overlap resolution may have moved it)
+            if vertical_gap > avg_height * 2.0:
+                continue  # too far — new paragraph
+            if bx > merged_x2 + avg_height * 1.5:
+                continue  # large horizontal gap — different column/region
+            # Merge this block into the group
+            group.append(j)
+            used[j] = True
+            # Update merged right edge across all blocks in group
+            merged_x2 = max(merged_x2, bx + bw)
+
+        if len(group) == 1:
+            paragraph_blocks.append(text_blocks[i])
+        else:
+            # Compute bounding box that covers the entire paragraph group
+            xs = [text_blocks[g]['bbox'][0] for g in group]
+            ys = [text_blocks[g]['bbox'][1] for g in group]
+            xe = [text_blocks[g]['bbox'][0] + text_blocks[g]['bbox'][2] for g in group]
+            ye = [text_blocks[g]['bbox'][1] + text_blocks[g]['bbox'][3] for g in group]
+            px, py = min(xs), min(ys)
+            pw = max(xe) - px
+            ph = max(ye) - py
+            paragraph_blocks.append({'bbox': (px, py, pw, ph)})
+            para_count += 1
+
+    # Replace text_blocks with paragraph-level blocks
+    text_blocks = paragraph_blocks
+    if para_count > 0:
+        line_count_after = len(text_blocks)
+        if args.verbose:
+            print(f"Combined {line_count} line-blocks into {line_count_after} paragraph-block "
+                  f"({line_count - line_count_after} merges)")
+
     # ---- Resolve overlaps between text blocks and graphical objects ----
     tt_stats = {'overlaps_found': 0, 'overlaps_fixed': 0}
     tg_stats = {'overlaps_found': 0, 'overlaps_fixed': 0}
