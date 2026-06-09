@@ -21,7 +21,7 @@ Detection strategies (all run, then results merged):
 A second pass detects text blocks separately.
 
 Usage:
-    python3 imgextract.py <input_image> [-o <dir>] [--min-area-pct 0.005] [--debug]
+    python3 imgextract.py <input_image> [-o <dir>] [--min-area-pct 0.005] [--min-text-area 2000] [--debug]
 """
 
 import sys
@@ -546,12 +546,13 @@ def main():
     parser.add_argument('--min-area-pct', type=float, default=0.005,
                         help='Min area fraction for graphical objects (default: 0.005)')
     parser.add_argument('--min-text-area', type=int, default=2000,
-                        help='Min area for text blocks (default: 2000)')
+                        help='Min area for text blocks (default: %(default)s)')
     parser.add_argument('--gap-threshold', type=float, default=0.12,
                         help='Proximity gap for merging nearby regions (default: 0.12)')
     parser.add_argument('--saturation-threshold', type=int, default=30,
                         help='Saturation threshold for color detection (default: 30)')
-    parser.add_argument('--verbose', action='store_true', help='Verbose debug output')
+    parser.add_argument('-v', '--verbose', action='count', default=0,
+                        help='Verbosity level: 0=silent (default), -v=summary, -vv=details')
     parser.add_argument('--debug', action='store_true', help='Save intermediate debug masks')
     parser.add_argument('--ollama-model', '-m', default=None,
                         help='Ollama vision model for OCR (e.g. maternion/LightOnOCR-2:1b). '
@@ -726,6 +727,24 @@ def main():
         print(f"Overlaps: {total_found} found, {total_fixed} fixed "
               f"(text-text: {tt_stats['overlaps_fixed']}, "
               f"text-graph: {tg_stats['overlaps_fixed']})")
+
+    # Per-block overlap details at verbose >= 2
+    if args.verbose >= 2:
+        if tt_stats['overlaps_found']:
+            print(f"\nText-text overlaps ({tt_stats['overlaps_found']} found, {tt_stats['overlaps_fixed']} fixed):")
+            for i, tb in enumerate(text_blocks):
+                x, y, bw, bh = tb['bbox']
+                if bw > 0:
+                    print(f"  [{i+1}] ({x},{y},{bw}x{bh}) — kept")
+                else:
+                    print(f"  [{i+1}] ({x},{y},{bw}x{bh}) — hidden (overlaps graph)")
+
+        if tg_stats['overlaps_found']:
+            print(f"\nText-graph overlaps ({tg_stats['overlaps_found']} found, {tg_stats['overlaps_fixed']} fixed):")
+            for i, tb in enumerate(text_blocks):
+                x, y, bw, bh = tb['bbox']
+                if bw == 0:
+                    print(f"  text[{i+1}] ({x},{y},{bw}x{bh}) → hidden by graph")
 
     overlaps_summary = {
         'text_text': {
