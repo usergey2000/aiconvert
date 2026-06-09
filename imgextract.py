@@ -728,62 +728,81 @@ def main():
         print(f"Detected {len(text_blocks)} text block(s).")
 
     # ---- Combine adjoining text blocks into paragraphs before OCR ----
-    paragraph_blocks = []
-    para_count = 0
+
     line_count = len(text_blocks)
-    used = [False] * len(text_blocks)
 
-    for i in range(len(text_blocks)):
-        if used[i]:
-            continue
-        # Start a new paragraph group with block i
-        group = [i]
-        used[i] = True
-        merged_x2 = text_blocks[i]['bbox'][0] + text_blocks[i]['bbox'][2]
+    def cluster_blocks_by(blocks, key_fn, thresh):
+        """Cluster list of indices by proximity of key_fn(i)."""
+        if not blocks:
+            return []
+        clusters = []  # [(key_val, [indices])]
+        for i in blocks:
+            kv = key_fn(i)
+            placed = False
+            for ci in range(len(clusters)):
+                if abs(kv - clusters[ci][0]) < thresh:
+                    clusters[ci][1].append(i)
+                    placed = True
+                    break
+            if not placed:
+                clusters.append([kv, [i]])
+        return [c[1] for c in clusters]
 
-        for j in range(i + 1, len(text_blocks)):
-            if used[j]:
+    # Step 1: cluster into columns, then chain-merge vertically adjacent blocks within each column
+    col_clusters = cluster_blocks_by(list(range(len(text_blocks))),
+                                     lambda i: text_blocks[i]['bbox'][0], thresh=150)
+
+    paragraph_blocks = []
+    for col_indices in col_clusters:
+        col_sorted = sorted(col_indices, key=lambda i: text_blocks[i]['bbox'][1])
+        used = [False] * len(col_sorted)
+        for si in range(len(col_sorted)):
+            if used[si]:
                 continue
-            bx, by, bw, bh = text_blocks[j]['bbox']
-            last_g = group[-1]
-            lx, ly, lbw, lbh = text_blocks[last_g]['bbox']
+            group = [col_sorted[si]]
+            used[si] = True
+            avg_h = text_blocks[group[0]]['bbox'][3]
+            for sj in range(si + 1, len(col_sorted)):
+                if used[sj]:
+                    continue
+                gi = group[-1]
+                gap = text_blocks[col_sorted[sj]]['bbox'][1] - (text_blocks[gi]['bbox'][1]+text_blocks[gi]['bbox'][3])
+                # Same paragraph: vertical gap within 3.5× avg line-height or negative overlap
+                if gap < 0 or gap <= avg_h * 3.5:
+                    group.append(col_sorted[sj])
+                    used[sj] = True
+                    avg_h = sum(text_blocks[g]['bbox'][3] for g in group) / len(group)
+                else:
+                    break
+            if len(group) == 1:
+                paragraph_blocks.append(text_blocks[group[0]])
+            else:
+                xs = [text_blocks[g]['bbox'][0] for g in group]
+                ys = [text_blocks[g]['bbox'][1] for g in group]
+                xe = [text_blocks[g]['bbox'][0]+text_blocks[g]['bbox'][2] for g in group]
+                ye = [text_blocks[g]['bbox'][1]+text_blocks[g]['bbox'][3] for g in group]
+                paragraph_blocks.append({'bbox': (min(xs), min(ys), max(xe)-min(xs), max(ye)-min(ys))})
 
-            vertical_gap = by - (ly + lbh)
-            avg_height = sum(text_blocks[g]['bbox'][3] for g in group) / len(group)
-            # Adjoin if: within 2× average line-height gap and left edges are similar
-            if vertical_gap < 0:
-                continue  # blocks out of reading order (overlap resolution may have moved it)
-            if vertical_gap > avg_height * 2.0:
-                continue  # too far — new paragraph
-            if bx > merged_x2 + avg_height * 1.5:
-                continue  # large horizontal gap — different column/region
-            # Merge this block into the group
-            group.append(j)
-            used[j] = True
-            # Update merged right edge across all blocks in group
-            merged_x2 = max(merged_x2, bx + bw)
+    # Step 2: add ~50px padding around each merged paragraph to expand OCR area
+    PAD = 50
+    padded = []
+    for b in paragraph_blocks:
+        px, py, pw, ph = b['bbox']
+        nx = max(0, px - PAD)
+        ny = max(0, py - PAD)
+        nw = min(w - nx, pw + 2*PAD)
+        nh = min(h - ny, ph + 2*PAD)
+        padded.append({'bbox': (nx, ny, nw, nh)})
+    paragraph_blocks = padded
 
-        if len(group) == 1:
-            paragraph_blocks.append(text_blocks[i])
-        else:
-            # Compute bounding box that covers the entire paragraph group
-            xs = [text_blocks[g]['bbox'][0] for g in group]
-            ys = [text_blocks[g]['bbox'][1] for g in group]
-            xe = [text_blocks[g]['bbox'][0] + text_blocks[g]['bbox'][2] for g in group]
-            ye = [text_blocks[g]['bbox'][1] + text_blocks[g]['bbox'][3] for g in group]
-            px, py = min(xs), min(ys)
-            pw = max(xe) - px
-            ph = max(ye) - py
-            paragraph_blocks.append({'bbox': (px, py, pw, ph)})
-            para_count += 1
-
-    # Replace text_blocks with paragraph-level blocks
+    # Replace text_blocks with paragraph-level blocks and report merge stats
+    n_merged = line_count - len(paragraph_blocks)
     text_blocks = paragraph_blocks
-    if para_count > 0:
+    if n_merged > 0:
         line_count_after = len(text_blocks)
         if args.verbose:
             print(f"Combined {line_count} line-blocks into {line_count_after} paragraph-block "
-                  f"({line_count - line_count_after} merges)")
+                  f"({n_merged} merges)")
 
     # ---- Resolve overlaps between text blocks and graphical objects ----
     tt_stats = {'overlaps_found': 0, 'overlaps_fixed': 0}
@@ -822,6 +841,17 @@ def main():
                 x, y, bw, bh = tb['bbox']
                 if bw == 0:
                     print(f"  text[{i+1}] ({x},{y},{bw}x{bh}) → hidden by graph")
+
+    # Clamp text blocks to page boundaries (overlap resolution can push beyond)
+    clamped_blocks = []
+    for b in text_blocks:
+        bx, by, bw, bh = b['bbox']
+        nx = max(0, min(bx, w - 1))
+        ny = max(0, min(by, h - 1))
+        nw = max(0, min(bw, w - nx))
+        nh = max(0, min(bh, h - ny))
+        clamped_blocks.append({'bbox': (nx, ny, nw, nh)})
+    text_blocks = clamped_blocks
 
     overlaps_summary = {
         'text_text': {
@@ -877,6 +907,7 @@ def main():
                         for b in text_blocks],
         'overlap_resolution': overlaps_summary,
     }
+
     summary_path = os.path.join(out_dir, f'{base}_summary.json')
     with open(summary_path, 'w') as f:
         json.dump(summary, f, indent=2)
