@@ -384,9 +384,10 @@ def detect_text_blocks(img, min_area: int = 2000) -> list:
         x, y, bw, bh = cv2.boundingRect(cnt)
         if bw < 50 or bh < 15:
             continue
-        if y < h * 0.02 or (y + bh) > h * 0.98:
-            continue
-        if x < w * 0.02 or (x + bw) > w * 0.98:
+        # Allow text near all edges.  Reject only true full-page bboxes
+        # (e.g. a giant background rect) — these are filtered later by
+        # page_frac_threshold in merge_regions.
+        if x < w * 0.02 and (x + bw) > w * 0.98:
             continue
         blocks.append({'bbox': (x, y, bw, bh)})
     return blocks
