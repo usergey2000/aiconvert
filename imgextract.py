@@ -391,7 +391,10 @@ def detect_text_blocks(img, min_area: int = 2000) -> list:
             continue
         # Reject regions that span most of the page height — these are likely
         # illustrations, tables, or other graphics misclassified as text blobs.
-        if bh > h * 0.15:
+        # Exception: wide blobs (>= 30% page width) are almost certainly multi-line
+        # text columns that were merged by morphological operations. Allow them through.
+        fw = bw / max(w, 1)
+        if bh > h * 0.15 and fw < 0.30:
             continue
         blocks.append({'bbox': (x, y, bw, bh)})
     return blocks
@@ -598,9 +601,28 @@ def main():
             continue
         if x < w * margin or (x + bw) > w * (1 - margin):
             continue
+        # Reject sparse blobs — bounding boxes full of scattered dark pixels on
+        # white background are text (letter edges from gradient detection, or
+        # dense columns of chars), not actual graphical objects. True graphics
+        # (photos, diagrams, charts) have dark content packed densely (>~18% of bbox).
         roi = img[y:y + bh, x:x + bw]
-        if roi.size > 0 and np.std(roi.astype(np.float64), axis=(0, 1)).mean() <= 5:
-            continue
+        if roi.size > 0:
+            arr = roi.astype(np.float64)
+            mean_gray = np.mean(arr)
+            dark_pct = np.sum(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)[y:y+bh, x:x+bw] < 180) / roi.size * 100
+            bright_pct = np.sum(np.all(arr > 230, axis=2)) / arr.size * 100
+            fw = bw / max(w, 1)
+            # Wide-bright: text columns spanning most of page width (page-1 issue)
+            wide_bright = fw > 0.50 and mean_gray > 225
+            sparse_text = dark_pct < 18 and box_area(r['bbox']) > min_abs_area * 0.5
+            if wide_bright or sparse_text:
+                if args.verbose >= 1:
+                    print(f"  FILTER (text blob): [{bw}x{bh}] {fw:.0%} width "
+                          f"mean_gray={mean_gray:.0f} dark={dark_pct:.0f}% bright={bright_pct:.0f}% → text")
+                continue
+            # Also reject uniform-white blobs (no real graphical content)
+            if np.std(arr, axis=(0, 1)).mean() <= 5:
+                continue
         graphical.append(r)
 
     # Relaxed fallback if nothing found
