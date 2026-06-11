@@ -642,48 +642,6 @@ def main():
         if args.verbose >= 1:
             print(f"  Relaxed filter: {len(graphical)} graphical objects")
 
-    # ---- Consolidated text-overlap post-filter (applies to both paths) ----
-    # Reject regions that overlap heavily with detected text blocks, but only
-    # when the region's content looks like a text paragraph (connected_comp
-    # blobs). Small gradient/color decorations next to text are legitimate.
-    if text_blocks and graphical:
-        text_bboxes = [(b['bbox'][0], b['bbox'][1], b['bbox'][2], b['bbox'][3])
-                       for b in text_blocks]
-        kept = []
-        for r in graphical:
-            rx, ry, rw, rh = r['bbox']
-            area = rw * rh
-            max_ov = 0.0
-            overlap_count = 0
-            for tx, ty, tw, th in text_bboxes:
-                xi = max(rx, tx); yi = max(ry, ty)
-                xe = min(rx + rw, tx + tw); ye = min(ry + rh, ty + th)
-                if xe > xi and ye > yi:
-                    ix = xe - xi; iy = ye - yi
-                    ov1 = (ix * iy) / max(rw * rh, 1)
-                    ov2 = (ix * iy) / max(tw * th, 1)
-                    max_ov = max(max_ov, ov1, ov2)
-                    overlap_count += 1
-
-            # connected-comp-only regions that are large AND overlap a text block:
-            # likely the same paragraph detected twice as both graphics and text.
-            sources = set(r.get('sources', []))
-            if 'connected_comp' in sources and sources == {'connected_comp'} \
-                    and max_ov > 0.5 and area > 50000:
-                continue
-            # Also reject wide paragraphs that reach near the page edge (likely text).
-            fw = rw / max(w, 1)
-            rx_pct = rx / max(w, 1)
-            re_edge = (w - rx - rw) / max(w, 1)
-            if fw > 0.5 and (rx_pct < 0.10 or re_edge < 0.10) \
-                    and overlap_count >= 1:
-                continue
-            # For other sources, reject if MANY text blocks overlap (indicating a paragraph).
-            if overlap_count >= 3:
-                continue
-            kept.append(r)
-        graphical = kept
-
     # Sort in reading order
     ordered = sort_reading_order(graphical) if graphical else []
     print(f"Detected {len(ordered)} graphical object(s) in reading order.")
@@ -698,7 +656,7 @@ def main():
         outpath = os.path.join(out_dir, f'{base}_graph_{i+1:02d}.png')
         cv2.imwrite(outpath, obj)
 
-    # text_blocks already detected earlier (needed for post-filter); reuse it here.
+    # text_blocks already detected earlier; reused here for overlap resolution.
 
     # ---- Resolve overlaps between text blocks and graphical objects ----
     tt_stats = {'overlaps_found': 0, 'overlaps_fixed': 0}
