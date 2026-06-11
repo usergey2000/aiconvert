@@ -389,6 +389,10 @@ def detect_text_blocks(img, min_area: int = 2000) -> list:
         # page_frac_threshold in merge_regions.
         if x < w * 0.02 and (x + bw) > w * 0.98:
             continue
+        # Reject regions that span most of the page height — these are likely
+        # illustrations, tables, or other graphics misclassified as text blobs.
+        if bh > h * 0.15:
+            continue
         blocks.append({'bbox': (x, y, bw, bh)})
     return blocks
 
@@ -472,7 +476,7 @@ def main():
 
     min_abs_area = h * w * args.min_area_pct
     page_frac_threshold = 0.50  # reject any bbox covering >50% of the page
-    max_object_frac = 0.25  # max area fraction for a single graphical object
+    max_object_frac = 0.40  # max area fraction for a single graphical object
 
     if args.verbose >= 1:
         print(f"Input: {args.image} ({w}x{h}, total area={w*h:,})")
@@ -539,9 +543,43 @@ def main():
     if args.verbose >= 1:
         print(f"  After dedup: {len(post_merge)} regions")
 
-    # Filter to final graphical objects
-    graphical = []
+    # Pre-filter oversized rectangular regions likely to be text paragraphs.
+    # Run BEFORE the main filter so they are excluded from both normal and
+    # relaxed paths (they would otherwise reach the relaxed fallback).
+    wide_pages = []
+    narrow_graphical = []
     for r in post_merge:
+        x, y, bw, bh = r['bbox']
+        fw = bw / max(w, 1)
+        left_margin = x / max(w, 1)
+        right_margin = (w - (x + bw)) / max(w, 1)
+        # Oversized if: wide enough AND close to page edge(s) AND paragraph-like shape.
+        # This catches full-width paragraphs that start/end near the page margins.
+        is_wide = fw > 0.70 and (left_margin < 0.10 or right_margin < 0.10)
+        is_para_like = 1.0 < (bw / max(bh, 1)) < 3.0
+        if is_wide and is_para_like:
+            wide_pages.append(r)
+        else:
+            narrow_graphical.append(r)
+
+    if args.verbose >= 1 and wide_pages:
+        for r in wide_pages:
+            x, y, bw, bh = r['bbox']
+            left_margin = x / max(w, 1)
+            right_margin = (w - (x + bw)) / max(w, 1)
+            print(f"  FILTER (oversized): [{bw}x{bh}] {fw:.0%} width  l={left_margin:.0%} r={right_margin:.0%} → likely text")
+
+    if args.verbose >= 1:
+        print(f"  Wide-rect rejected: {len(wide_pages)}, passing to filter: {len(narrow_graphical)}")
+
+    # ---- Detect text blocks (needed for post-filter after both normal/relaxed paths) ----
+    text_blocks = detect_text_blocks(img, min_area=args.min_text_area)
+    if args.verbose >= 1:
+        print(f"Detected {len(text_blocks)} text block(s).")
+
+    # Filter to final graphical objects (from narrow_graphical = non-wide-rect candidates)
+    graphical = []
+    for r in narrow_graphical:
         x, y, bw, bh = r['bbox']
         area = box_area(r['bbox'])
         if area < min_abs_area:
@@ -574,7 +612,16 @@ def main():
                      and r['bbox'][0] > w * 0.01
                      and r['bbox'][0] + r['bbox'][2] < w * 0.99
                      and r['bbox'][1] > h * 0.01
-                     and r['bbox'][1] + r['bbox'][3] < h * 0.99]
+                     and r['bbox'][1] + r['bbox'][3] < h * 0.99
+                     # Skip wide-rect text paragraphs in relaxed mode
+                     and not (r['bbox'][2] / max(w, 1) > 0.70
+                              and r['bbox'][0] / max(w, 1) < 0.10
+                              or r['bbox'][2] / max(w, 1) > 0.70
+                              and (w - r['bbox'][0] - r['bbox'][2]) / max(w, 1) < 0.10
+                             )
+                     and not (r['bbox'][2] / max(w, 1) > 0.70
+                              and 1.0 < r['bbox'][2] / max(r['bbox'][3], 1) < 3.0)]
+
         # Remove regions contained in larger graphical regions
         final = []
         for r in graphical:
@@ -593,6 +640,48 @@ def main():
         if args.verbose >= 1:
             print(f"  Relaxed filter: {len(graphical)} graphical objects")
 
+    # ---- Consolidated text-overlap post-filter (applies to both paths) ----
+    # Reject regions that overlap heavily with detected text blocks, but only
+    # when the region's content looks like a text paragraph (connected_comp
+    # blobs). Small gradient/color decorations next to text are legitimate.
+    if text_blocks and graphical:
+        text_bboxes = [(b['bbox'][0], b['bbox'][1], b['bbox'][2], b['bbox'][3])
+                       for b in text_blocks]
+        kept = []
+        for r in graphical:
+            rx, ry, rw, rh = r['bbox']
+            area = rw * rh
+            max_ov = 0.0
+            overlap_count = 0
+            for tx, ty, tw, th in text_bboxes:
+                xi = max(rx, tx); yi = max(ry, ty)
+                xe = min(rx + rw, tx + tw); ye = min(ry + rh, ty + th)
+                if xe > xi and ye > yi:
+                    ix = xe - xi; iy = ye - yi
+                    ov1 = (ix * iy) / max(rw * rh, 1)
+                    ov2 = (ix * iy) / max(tw * th, 1)
+                    max_ov = max(max_ov, ov1, ov2)
+                    overlap_count += 1
+
+            # connected-comp-only regions that are large AND overlap a text block:
+            # likely the same paragraph detected twice as both graphics and text.
+            sources = set(r.get('sources', []))
+            if 'connected_comp' in sources and sources == {'connected_comp'} \
+                    and max_ov > 0.5 and area > 50000:
+                continue
+            # Also reject wide paragraphs that reach near the page edge (likely text).
+            fw = rw / max(w, 1)
+            rx_pct = rx / max(w, 1)
+            re_edge = (w - rx - rw) / max(w, 1)
+            if fw > 0.5 and (rx_pct < 0.10 or re_edge < 0.10) \
+                    and overlap_count >= 1:
+                continue
+            # For other sources, reject if MANY text blocks overlap (indicating a paragraph).
+            if overlap_count >= 3:
+                continue
+            kept.append(r)
+        graphical = kept
+
     # Sort in reading order
     ordered = sort_reading_order(graphical) if graphical else []
     print(f"Detected {len(ordered)} graphical object(s) in reading order.")
@@ -607,10 +696,7 @@ def main():
         outpath = os.path.join(out_dir, f'{base}_graph_{i+1:02d}.png')
         cv2.imwrite(outpath, obj)
 
-    # ---- Detect text blocks ----
-    text_blocks = detect_text_blocks(img, min_area=args.min_text_area)
-    if args.verbose >= 1:
-        print(f"Detected {len(text_blocks)} text block(s).")
+    # text_blocks already detected earlier (needed for post-filter); reuse it here.
 
     # ---- Resolve overlaps between text blocks and graphical objects ----
     tt_stats = {'overlaps_found': 0, 'overlaps_fixed': 0}
@@ -619,15 +705,17 @@ def main():
     if args.verbose >= 2:
         text_pre = [tuple(b['bbox']) for b in text_blocks]
     else:
-        text_pre = []
+        text_pre = None
+
+    # Initialize text_mid before conditional block so it's always bound
+    text_mid: list[tuple[int, ...]] = []
 
     if text_blocks and ordered:
         # Text-text overlaps
         text_resolved, tt_stats = resolve_text_text_overlaps(text_blocks)
 
         # Capture intermediate state after text-text resolution for verbose >= 2 attribution
-        if args.verbose >= 2:
-            text_mid = [tuple(b['bbox']) for b in text_blocks]
+        text_mid = [tuple(b['bbox']) for b in text_blocks]
         for i, tb in enumerate(text_resolved):
             text_blocks[i]['bbox'] = tuple(tb['bbox'])
 
@@ -642,7 +730,7 @@ def main():
               f"text-graph: {tg_stats['overlaps_fixed']})")
 
     # Per-block overlap resolution details at verbose level >= 2
-    if args.verbose >= 2 and text_pre:
+    if args.verbose >= 2 and text_pre and ordered:
         print(f"\nText block overlap resolution (per-block detail):")
         for i, (tb_pre, tb_post) in enumerate(zip(text_pre, text_blocks)):
             px, py, pw, ph = text_pre[i]
@@ -660,7 +748,8 @@ def main():
             # Compute what changed by comparing pre/mid/post phases separately
             w_changed = (pw != nw)
             h_changed = (ph != nh)
-            x_mid, y_mid, w_mid, h_mid = text_mid[i] if 'text_mid' in locals() else (px, py, pw, ph)
+            # x_mid, y_mid, w_mid, h_mid are populated below inside the `if text_mid:` guard
+            x_mid = y_mid = w_mid = h_mid = px  # default to pre-values
 
             # Determine which phase caused what change
             causes = []
@@ -715,17 +804,17 @@ def main():
                             if iy_val > ix_val:
                                 ny_below = gry + grh + 4
                                 ny_above = max(0, gry - gh2 - 4)
-                                moved_down = (gy2 + gh2 <= gri + grh) or \
+                                moved_down = (gy2 + gh2 <= grx + grw) or \
                                     (ny >= ny_below) or (ny == 0 and abs(ny - gy2) > abs(ny_above - gy2))
                                 causes.append(f'graph[{gi+1}] move {"down" if moved_down else "up"} '
-                                              f'(shrunk-w → {gw2}<{MIN_DIM})')
+                                              f'(shrunk-w → {gw2}x{nw})')
                             else:
                                 nx_right = grx + grw + 4
                                 nx_left = max(0, grx - gw2 - 4)
                                 moved_right = (gx2 + gw2 <= grx) or \
                                     (nx >= nx_right) or (nx == 0 and abs(nx - gx2) > abs(nx_left - gx2))
                                 causes.append(f'graph[{gi+1}] move {"right" if moved_right else "left"} '
-                                              f'(shrunk-h → {gh2}<{MIN_DIM})')
+                                              f'(shrunk-h → {gh2}x{nh})')
 
             if not causes:
                 action = 'unchanged'
