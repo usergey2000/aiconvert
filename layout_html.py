@@ -17,6 +17,8 @@ Usage (imported from imgextract.py):
 import sys
 import base64
 import io
+import subprocess
+import tempfile
 
 import pytesseract
 
@@ -30,6 +32,99 @@ TESSERACT_OEM = "1"    # Tesseract 4+ LSTM only
 TESSERACT_CMD = "/opt/metis/el8/contrib/tesseract/tesseract-latest-gcc-12.3.0/bin/tesseract"
 
 pytesseract.pytesseract.tesseract_cmd = TESSERACT_CMD
+
+
+def ocr_text_block_system_tess(block_img: np.ndarray, tess_lang: str = "eng") -> str:
+    """OCR a single text-block image using the system tesseract binary.
+
+    Uses subprocess to call tesseract CLI directly instead of pytesseract library.
+    This can be faster and more reliable in some environments.
+
+    Parameters
+    ----------
+    block_img : np.ndarray
+        Cropped BGR numpy array of a text block region.
+    tess_lang : str
+        Tesseract language code(s) (e.g. ``'eng'``, ``'rus'``).
+
+    Returns
+    -------
+    str
+        Extracted text content (raw, no markdown).
+    """
+    # Convert to grayscale for tesseract
+    gray = cv2.cvtColor(block_img, cv2.COLOR_BGR2GRAY)
+
+    # Binarize to improve OCR on scanned pages
+    _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+    # Create temp file for input image
+    with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp_in:
+        cv2.imwrite(tmp_in.name, thresh)
+        tmp_path = tmp_in.name
+
+    # Create temp file for output
+    with tempfile.NamedTemporaryFile(suffix='.txt', delete=False) as tmp_out:
+        tmp_out_path = tmp_out.name
+
+    try:
+        # Build tesseract command
+        config = f"--psm {TESSERACT_PSM} --oem {TESSERACT_OEM}"
+        cmd = [
+            TESSERACT_CMD,
+            tmp_path,
+            tmp_out_path,
+            '-l', tess_lang,
+            config
+        ]
+
+        # Run tesseract
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            # Fall back to pytesseract on error
+            return _ocr_with_py_tesseract(block_img, tess_lang)
+
+        # Read output
+        with open(tmp_out_path, 'r', encoding='utf-8') as f:
+            text = f.read()
+
+        # Clean up output
+        import re
+        text = re.sub(r'\n\n+', '\n', text)
+        return text.strip()
+
+    finally:
+        # Cleanup temp files
+        import os
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+        if os.path.exists(tmp_out_path):
+            os.unlink(tmp_out_path)
+
+
+def _ocr_with_py_tesseract(block_img: np.ndarray, tess_lang: str = "eng") -> str:
+    """Internal helper to run pytesseract OCR."""
+    rgb = cv2.cvtColor(block_img, cv2.COLOR_BGR2RGB)
+
+    from PIL import Image
+    img = Image.fromarray(rgb)
+
+    gray = cv2.cvtColor(block_img, cv2.COLOR_BGR2GRAY)
+    _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    img_thresh = Image.fromarray(thresh)
+
+    ocr_config = (
+        f"--psm {TESSERACT_PSM} "
+        f"--oem {TESSERACT_OEM}"
+    )
+    text = pytesseract.image_to_string(
+        img_thresh,
+        lang=tess_lang,
+        config=ocr_config,
+    )
+    import re
+    text = re.sub(r'\n\n+', '\n', text)
+    return text.strip()
 
 
 def ocr_with_ollama(block_img: np.ndarray, model: str) -> str:
@@ -176,7 +271,7 @@ def ocr_with_ollama(block_img: np.ndarray, model: str) -> str:
     return raw.strip()
 
 
-def ocr_text_block(block_img: np.ndarray, model: str = None, tess_lang: str = "eng") -> str:
+def ocr_text_block(block_img: np.ndarray, model: str = None, tess_lang: str = "eng", use_system_tess: bool = False) -> str:
     """OCR a single text-block image and return extracted text.
 
     Uses the Ollama vision model when *model* is provided;
@@ -191,6 +286,8 @@ def ocr_text_block(block_img: np.ndarray, model: str = None, tess_lang: str = "e
         When *None*, Tesseract is used.
     tess_lang : str
         Tesseract language code(s) (e.g. ``'eng'``, ``'deu+fra'``).
+    use_system_tess : bool
+        Use system tesseract binary instead of Python library.
 
     Returns
     -------
@@ -201,31 +298,10 @@ def ocr_text_block(block_img: np.ndarray, model: str = None, tess_lang: str = "e
         return ocr_with_ollama(block_img, model)
 
     # --- Tesseract path ---
-    rgb = cv2.cvtColor(block_img, cv2.COLOR_BGR2RGB)
+    if use_system_tess:
+        return ocr_text_block_system_tess(block_img, tess_lang)
 
-    # Convert to PIL Image for pytesseract
-    from PIL import Image
-    img = Image.fromarray(rgb)
-
-    # Binarize to improve OCR on scanned pages
-    gray = cv2.cvtColor(block_img, cv2.COLOR_BGR2GRAY)
-    _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    img_thresh = Image.fromarray(thresh)
-
-    ocr_config = (
-        f"--psm {TESSERACT_PSM} "
-        f"--oem {TESSERACT_OEM}"
-    )
-    text = pytesseract.image_to_string(
-        img_thresh,
-        lang=tess_lang,
-        config=ocr_config,
-    )
-    # Remove empty lines (lines with no content between newlines)
-    import re
-    # Replace \n\n+ (empty line(s) between content) with \n (single newline)
-    text = re.sub(r'\n\n+', '\n', text)
-    return text.strip()
+    return _ocr_with_py_tesseract(block_img, tess_lang)
 
 
 def img_to_data_uri(arr: np.ndarray, fmt: str = "png") -> str:
@@ -254,6 +330,7 @@ def assemble_layout_html(
     text_blocks: list,
     model: str = None,
     tess_lang: str = "eng",
+    use_system_tess: bool = False,
 ) -> str:
     """Build a layout-preserving HTML document from detected regions.
 
@@ -274,6 +351,8 @@ def assemble_layout_html(
         Ollama model name for OCR. When None, Tesseract is used.
     tess_lang : str
         Tesseract language code(s) (e.g. ``'eng'``, ``'deu+fra'``).
+    use_system_tess : bool
+        Use system tesseract binary instead of Python library.
 
     Returns
     -------
@@ -316,7 +395,7 @@ def assemble_layout_html(
         crop = img[y:y + bh, x:x + bw]
         if crop.size == 0:
             continue
-        text = ocr_text_block(crop, model=model, tess_lang=tess_lang)
+        text = ocr_text_block(crop, model=model, tess_lang=tess_lang, use_system_tess=use_system_tess)
         text_items.append({
             "x": x, "y": y, "w": bw, "h": bh,
             "text": sanitize_html(text),

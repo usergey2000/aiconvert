@@ -76,6 +76,9 @@ python3 imgextract.py page-1.png \
 
 # OCR language (for text blocks in layout HTML)
 python3 imgextract.py page-1.png -o output_dir/ --tess-lang rus
+
+# Use system tesseract binary instead of Python library
+python3 imgextract.py page-1.png -o output_dir/ --tess-system
 ```
 
 ### Parameters
@@ -88,6 +91,7 @@ python3 imgextract.py page-1.png -o output_dir/ --tess-lang rus
 | **verbose** | off | Print detailed detection logs |
 | **debug** | off | Save intermediate color/edge/CC masks |
 | **tess-lang** | `eng` | Tesseract language code(s) for text OCR (e.g., `rus`, `deu+fra`) |
+| **tess-system** | off | Use system tesseract binary directly instead of Python library |
 
 ### Overlap Resolution
 

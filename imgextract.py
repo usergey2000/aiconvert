@@ -466,6 +466,8 @@ def main():
                              'When given, Ollama is used per text block; otherwise Tesseract is used.')
     parser.add_argument('--tess-lang', default='eng',
                         help='Tesseract language(s) to use (default: eng). See tesseract --list-langs.')
+    parser.add_argument('--tess-system', action='store_true',
+                        help='Use system tesseract binary instead of Python library for OCR.')
     args = parser.parse_args()
 
     img = load_image(args.image)
@@ -891,6 +893,7 @@ def main():
     html_output = layout_html.assemble_layout_html(
         img, h, w, ordered, text_blocks,
         model=args.ollama_model, tess_lang=args.tess_lang,
+        use_system_tess=args.tess_system,
     )
     html_path = os.path.join(out_dir, f'{base}_layout.html')
     with open(html_path, 'w', encoding='utf-8') as f:
