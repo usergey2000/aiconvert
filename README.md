@@ -37,6 +37,20 @@ Four complementary OpenCV-based strategies detect graphical objects, then result
 5. **Sort** - reading order (top-to-bottom, left-to-right)
 6. **Text block detection** - separately identifies text regions
 
+### Multilingual Text Support
+
+For pages with non-English text (e.g., Russian), use the `--tess-lang` option to specify the appropriate language code:
+
+```bash
+# Russian text
+python3 imgextract.py page-1.png -o output_dir/ --tess-lang rus
+
+# Multiple languages (comma-separated in Tesseract format)
+python3 imgextract.py page-1.png -o output_dir/ --tess-lang eng+rus
+```
+
+Run `tesseract --list-langs` to see available language codes.
+
 ### Bug Fixes
 
 - Removed dead code (unreachable `return` statement) in `_try_move_horizontally()` function
@@ -59,6 +73,9 @@ python3 imgextract.py page-1.png \
   --min-area-pct 0.005 \
   --gap-threshold 0.12 \
   --saturation-threshold 30
+
+# OCR language (for text blocks in layout HTML)
+python3 imgextract.py page-1.png -o output_dir/ --tess-lang rus
 ```
 
 ### Parameters
@@ -70,6 +87,7 @@ python3 imgextract.py page-1.png \
 | **saturation-threshold** | 30 | HSV saturation threshold for color detection |
 | **verbose** | off | Print detailed detection logs |
 | **debug** | off | Save intermediate color/edge/CC masks |
+| **tess-lang** | `eng` | Tesseract language code(s) for text OCR (e.g., `rus`, `deu+fra`) |
 
 ### Overlap Resolution
 
